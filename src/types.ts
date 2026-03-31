@@ -19,14 +19,16 @@ export interface QueryParams {
 }
 
 export interface DownloadConfig {
-  chunk_minutes: number;
-  delay_ms: number;
+  format: "csv" | "xlsx_by_day";
+  records_per_sec: number;
 }
 
 export interface ProgressPayload {
   total_chunks: number;
   completed_chunks: number;
   total_records: number;
+  percent: number;
+  eta_seconds: number | null;
   status: "running" | "completed" | "cancelled" | "error";
   message: string;
 }
@@ -69,6 +71,6 @@ export const DEFAULT_CONFIG: InfluxConfig = {
 };
 
 export const DEFAULT_DOWNLOAD_CONFIG: DownloadConfig = {
-  chunk_minutes: 10,
-  delay_ms: 200,
+  format: "csv",
+  records_per_sec: 3000,
 };

@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
+import { message } from "@tauri-apps/plugin-dialog";
 import {
   PlusIcon,
   XIcon,
@@ -217,9 +218,13 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
 
   const handleDownload = async () => {
     if (!selectedBucket || !selectedMeasurement) return;
+    const ext = downloadConfig.format === "xlsx_by_day" ? "xlsx" : "csv";
     const filePath = await save({
-      defaultPath: `data_${Date.now()}.csv`,
-      filters: [{ name: "CSV 文件", extensions: ["csv"] }],
+      defaultPath: `data_${Date.now()}.${ext}`,
+      filters:
+        downloadConfig.format === "xlsx_by_day"
+          ? [{ name: "Excel 文件", extensions: ["xlsx"] }]
+          : [{ name: "CSV 文件", extensions: ["csv"] }],
     });
     if (!filePath) return;
 
@@ -238,6 +243,13 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
           event.payload.status === "error"
         ) {
           setIsDownloading(false);
+          const title =
+            event.payload.status === "completed"
+              ? "下载完成"
+              : event.payload.status === "cancelled"
+                ? "已终止"
+                : "下载失败";
+          void message(event.payload.message, { title, kind: "info" });
         }
       },
     );
@@ -498,7 +510,7 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
               className="flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
             >
               <DownloadIcon size={14} />
-              批量下载 CSV
+              开始下载
             </button>
           ) : (
             <button
@@ -506,7 +518,7 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
               className="flex items-center gap-2 px-4 py-2 rounded-lg bg-red-600/80 hover:bg-red-500 text-white text-sm font-medium transition-colors"
             >
               <StopCircleIcon size={14} />
-              取消下载
+              终止任务
             </button>
           )}
         </div>
@@ -529,41 +541,43 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
           <div className="p-5">
             <div className="flex items-center gap-6 flex-wrap">
               <label className="flex items-center gap-2 text-sm text-slate-300">
-                分块时长
-                <input
-                  type="number"
-                  min={1}
-                  max={1440}
-                  value={downloadConfig.chunk_minutes}
+                导出格式
+                <select
+                  value={downloadConfig.format}
                   onChange={(e) =>
                     setDownloadConfig((c) => ({
                       ...c,
-                      chunk_minutes: Number(e.target.value),
+                      format: e.target.value as DownloadConfig["format"],
                     }))
                   }
-                  className="w-20 bg-[#0f1117] border border-slate-600 rounded-lg px-2 py-1 text-sm text-slate-200 text-right focus:outline-none focus:border-blue-500"
-                />
-                <span className="text-slate-500">分钟/块</span>
+                  disabled={isDownloading}
+                  className="bg-[#0f1117] border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-blue-500 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <option value="csv">CSV（单表）</option>
+                  <option value="xlsx_by_day">XLSX（按天分 Sheet）</option>
+                </select>
               </label>
               <label className="flex items-center gap-2 text-sm text-slate-300">
-                请求间隔
+                每秒下载条数上限
                 <input
                   type="number"
-                  min={0}
-                  max={10000}
-                  value={downloadConfig.delay_ms}
+                  min={100}
+                  max={5000}
+                  step={100}
+                  value={downloadConfig.records_per_sec}
                   onChange={(e) =>
                     setDownloadConfig((c) => ({
                       ...c,
-                      delay_ms: Number(e.target.value),
+                      records_per_sec: Number(e.target.value),
                     }))
                   }
-                  className="w-24 bg-[#0f1117] border border-slate-600 rounded-lg px-2 py-1 text-sm text-slate-200 text-right focus:outline-none focus:border-blue-500"
+                  disabled={isDownloading}
+                  className="w-24 bg-[#0f1117] border border-slate-600 rounded-lg px-2 py-1 text-sm text-slate-200 text-right focus:outline-none focus:border-blue-500 disabled:opacity-40 disabled:cursor-not-allowed"
                 />
-                <span className="text-slate-500">ms</span>
+                <span className="text-slate-500">条/秒</span>
               </label>
               <p className="text-xs text-slate-500">
-                建议：分块小、间隔大 → 服务器负载低；分块大、间隔短 → 下载快
+                建议：默认 3000；生产环境通常 2000~5000 更稳（我已限制最大 5000）
               </p>
             </div>
 
@@ -578,9 +592,19 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
                     {progress.message}
                   </span>
                   <span className="font-mono">
+                    {progress.percent.toFixed(1)}% ·{" "}
                     {progress.completed_chunks}/{progress.total_chunks} 块 ·{" "}
                     {progress.total_records.toLocaleString()} 条
                   </span>
+                </div>
+                <div className="flex items-center justify-between text-xs text-slate-500">
+                  <span>
+                    预计剩余：
+                    {progress.eta_seconds == null
+                      ? "--"
+                      : formatDuration(progress.eta_seconds)}
+                  </span>
+                  <span>当前状态：{progress.status}</span>
                 </div>
                 <div className="w-full bg-slate-700/60 rounded-full h-2 overflow-hidden">
                   <div
@@ -594,13 +618,7 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
                             : "bg-blue-500"
                     }`}
                     style={{
-                      width: `${
-                        progress.total_chunks > 0
-                          ? (progress.completed_chunks /
-                              progress.total_chunks) *
-                            100
-                          : 0
-                      }%`,
+                      width: `${Math.min(100, Math.max(0, progress.percent))}%`,
                     }}
                   />
                 </div>
@@ -737,4 +755,13 @@ function SelectBox({
       />
     </div>
   );
+}
+
+function formatDuration(totalSeconds: number) {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h > 0) return `${h}h ${String(m).padStart(2, "0")}m ${String(sec).padStart(2, "0")}s`;
+  return `${m}m ${String(sec).padStart(2, "0")}s`;
 }
