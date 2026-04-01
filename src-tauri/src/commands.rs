@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
@@ -417,7 +417,12 @@ impl XlsxByDayState {
                 continue;
             }
 
-            let out: Vec<&str> = self.keep_idxs.iter().filter_map(|&i| rec.get(i)).collect();
+            let mut out: Vec<String> = self
+                .keep_idxs
+                .iter()
+                .filter_map(|&i| rec.get(i))
+                .map(|s| s.to_string())
+                .collect();
             if out.iter().all(|v| v.is_empty()) {
                 continue;
             }
@@ -425,13 +430,23 @@ impl XlsxByDayState {
             let time_idx = self
                 .time_col_idx_in_keep
                 .ok_or("XLSX 导出需要包含 _time 列")?;
-            let time_str = out
-                .get(time_idx)
-                .ok_or("内部错误: _time 列越界")?
-                .trim();
 
-            let date = extract_yyyy_mm_dd(time_str).ok_or_else(|| {
-                format!("无法解析 _time: '{}'", time_str)
+            // Convert _time from UTC to local time (RFC3339 with offset).
+            // Use the LOCAL date for sheet naming so sheets match what the user sees.
+            let local_time_str = {
+                let raw = out
+                    .get(time_idx)
+                    .ok_or("内部错误: _time 列越界")?
+                    .trim()
+                    .to_string();
+                utc_to_local_rfc3339(&raw)
+            };
+            if let Some(v) = out.get_mut(time_idx) {
+                *v = local_time_str.clone();
+            }
+
+            let date = extract_yyyy_mm_dd(&local_time_str).ok_or_else(|| {
+                format!("无法解析 _time: '{}'", local_time_str)
             })?;
 
             let sheet_idx = self.ensure_sheet(&date);
@@ -440,7 +455,7 @@ impl XlsxByDayState {
             let row = self.next_row[sheet_idx];
             for (col, cell) in out.iter().enumerate() {
                 self.worksheets[sheet_idx]
-                    .write_string(row, col as u16, *cell)
+                    .write_string(row, col as u16, cell.as_str())
                     .map_err(|e| e.to_string())?;
             }
             self.next_row[sheet_idx] += 1;
@@ -571,15 +586,7 @@ fn parse_time(s: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, String> {
         return parse_relative_duration(rest, now);
     }
 
-    // datetime-local format from HTML input: "2024-01-15T10:30"
-    if s.len() == 16 && s.contains('T') && !s.ends_with('Z') {
-        let with_z = format!("{}:00Z", s);
-        return with_z
-            .parse::<DateTime<Utc>>()
-            .map_err(|e| format!("无效时间 '{}': {}", s, e));
-    }
-
-    // Full RFC3339
+    // Full RFC3339 (frontend always sends proper ISO strings with timezone)
     s.parse::<DateTime<Utc>>()
         .map_err(|e| format!("无效时间 '{}': {}", s, e))
 }
@@ -639,6 +646,7 @@ fn write_csv_chunk(
 
     let mut header_record: Option<csv::StringRecord> = None;
     let mut keep_idxs: Vec<usize> = vec![];
+    let mut time_col_in_out: Option<usize> = None;
     let mut count = 0u64;
 
     for rec in rdr.records() {
@@ -646,12 +654,10 @@ fn write_csv_chunk(
         if header_record.is_none() {
             header_record = Some(rec.clone());
             keep_idxs = build_keep_indices(&rec);
+            let header: Vec<&str> = keep_idxs.iter().filter_map(|&i| rec.get(i)).collect();
+            time_col_in_out = header.iter().position(|&c| c == "_time");
             if !*header_written {
-                let out: Vec<&str> = keep_idxs
-                    .iter()
-                    .filter_map(|&i| rec.get(i))
-                    .collect();
-                wtr.write_record(out)?;
+                wtr.write_record(&header)?;
                 *header_written = true;
             }
             continue;
@@ -660,19 +666,39 @@ fn write_csv_chunk(
         // Repeated header from another table
         if header_record.as_ref() == Some(&rec) {
             keep_idxs = build_keep_indices(&rec);
+            let header: Vec<&str> = keep_idxs.iter().filter_map(|&i| rec.get(i)).collect();
+            time_col_in_out = header.iter().position(|&c| c == "_time");
             continue;
         }
 
-        let out: Vec<&str> = keep_idxs.iter().filter_map(|&i| rec.get(i)).collect();
+        let mut out: Vec<String> = keep_idxs
+            .iter()
+            .filter_map(|&i| rec.get(i))
+            .map(|s| s.to_string())
+            .collect();
         if out.iter().all(|v| v.is_empty()) {
             continue;
         }
-        wtr.write_record(out)?;
+        if let Some(t_idx) = time_col_in_out {
+            if let Some(v) = out.get_mut(t_idx) {
+                *v = utc_to_local_rfc3339(v);
+            }
+        }
+        wtr.write_record(&out)?;
         count += 1;
     }
 
     wtr.flush()?;
     Ok(count)
+}
+
+/// Convert a UTC RFC3339 timestamp to the machine's local timezone with offset.
+/// e.g. "2026-03-30T01:05:17.350Z" → "2026-03-30T09:05:17.350+08:00"
+fn utc_to_local_rfc3339(s: &str) -> String {
+    match s.parse::<DateTime<Utc>>() {
+        Ok(dt) => dt.with_timezone(&Local).to_rfc3339(),
+        Err(_) => s.to_string(),
+    }
 }
 
 fn build_keep_indices(header: &csv::StringRecord) -> Vec<usize> {

@@ -165,9 +165,13 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
 
   const buildQueryParams = (): QueryParams => {
     const start =
-      timeRange.mode === "relative" ? timeRange.relative : timeRange.start;
+      timeRange.mode === "relative"
+        ? timeRange.relative
+        : localDatetimeToRFC3339(timeRange.start);
     const stop =
-      timeRange.mode === "relative" ? "now()" : timeRange.stop || "now()";
+      timeRange.mode === "relative"
+        ? "now()"
+        : localDatetimeToRFC3339(timeRange.stop);
     return {
       bucket: selectedBucket,
       measurement: selectedMeasurement,
@@ -181,6 +185,13 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
 
   const handlePreview = async () => {
     if (!selectedBucket || !selectedMeasurement) return;
+    if (timeRange.mode === "absolute") {
+      const v = validateAbsoluteRange(timeRange.start, timeRange.stop);
+      if (!v.ok) {
+        setError(v.error);
+        return;
+      }
+    }
     setLoadingKey("preview", true);
     setError("");
     setShowPreview(true);
@@ -218,6 +229,13 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
 
   const handleDownload = async () => {
     if (!selectedBucket || !selectedMeasurement) return;
+    if (timeRange.mode === "absolute") {
+      const v = validateAbsoluteRange(timeRange.start, timeRange.stop);
+      if (!v.ok) {
+        setError(v.error);
+        return;
+      }
+    }
     const ext = downloadConfig.format === "xlsx_by_day" ? "xlsx" : "csv";
     const filePath = await save({
       defaultPath: `data_${Date.now()}.${ext}`,
@@ -458,24 +476,77 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
                     ))}
                   </select>
                 ) : (
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="datetime-local"
-                      value={timeRange.start}
-                      onChange={(e) =>
-                        setTimeRange((t) => ({ ...t, start: e.target.value }))
-                      }
-                      className="bg-[#0f1117] border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-blue-500"
-                    />
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="date"
+                        value={splitLocalDateTime(timeRange.start).date}
+                        onChange={(e) => {
+                          const cur = splitLocalDateTime(timeRange.start);
+                          setTimeRange((t) => ({
+                            ...t,
+                            start: combineLocalDateTime(
+                              e.target.value,
+                              cur.time || "00:00:00",
+                            ),
+                          }));
+                        }}
+                        className="bg-[#0f1117] border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-blue-500"
+                      />
+                      <input
+                        type="time"
+                        step="1"
+                        value={splitLocalDateTime(timeRange.start).time}
+                        onChange={(e) => {
+                          const cur = splitLocalDateTime(timeRange.start);
+                          setTimeRange((t) => ({
+                            ...t,
+                            start: combineLocalDateTime(
+                              cur.date || todayLocalDate(),
+                              e.target.value || "00:00:00",
+                            ),
+                          }));
+                        }}
+                        className="bg-[#0f1117] border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-blue-500"
+                      />
+                    </div>
                     <span className="text-slate-500 text-xs">至</span>
-                    <input
-                      type="datetime-local"
-                      value={timeRange.stop}
-                      onChange={(e) =>
-                        setTimeRange((t) => ({ ...t, stop: e.target.value }))
-                      }
-                      className="bg-[#0f1117] border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-blue-500"
-                    />
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="date"
+                        value={splitLocalDateTime(timeRange.stop).date}
+                        onChange={(e) => {
+                          const cur = splitLocalDateTime(timeRange.stop);
+                          setTimeRange((t) => ({
+                            ...t,
+                            stop: combineLocalDateTime(
+                              e.target.value,
+                              cur.time || "23:59:59",
+                            ),
+                          }));
+                        }}
+                        className="bg-[#0f1117] border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-blue-500"
+                      />
+                      <input
+                        type="time"
+                        step="1"
+                        value={splitLocalDateTime(timeRange.stop).time}
+                        onChange={(e) => {
+                          const cur = splitLocalDateTime(timeRange.stop);
+                          setTimeRange((t) => ({
+                            ...t,
+                            stop: combineLocalDateTime(
+                              cur.date || todayLocalDate(),
+                              e.target.value || "23:59:59",
+                            ),
+                          }));
+                        }}
+                        className="bg-[#0f1117] border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-blue-500"
+                      />
+                    </div>
+                    <span className="text-xs text-slate-600" title="时间按本地时区输入，查询时自动转为 UTC">
+                      本地时区 {tzOffsetLabel()}
+                    </span>
                   </div>
                 )}
               </div>
@@ -764,4 +835,85 @@ function formatDuration(totalSeconds: number) {
   const sec = s % 60;
   if (h > 0) return `${h}h ${String(m).padStart(2, "0")}m ${String(sec).padStart(2, "0")}s`;
   return `${m}m ${String(sec).padStart(2, "0")}s`;
+}
+
+/**
+ * Convert a datetime-local string ("2026-03-30T09:05" or "2026-03-30T09:05:30")
+ * to a valid RFC3339 UTC string ("2026-03-30T01:05:00Z" for UTC+8).
+ * The browser interprets datetime-local as local time; new Date() handles the conversion.
+ */
+function localDatetimeToRFC3339(s: string): string {
+  if (!s) return "";
+  // Accept common manual inputs like "2026-03-24 00:00:00"
+  // and normalize to something Date() can parse reliably.
+  let normalized = s.trim().replace(" ", "T");
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(normalized)) {
+    normalized = `${normalized}:00`;
+  }
+  const d = new Date(normalized);
+  if (isNaN(d.getTime())) return "";
+  return d.toISOString(); // always UTC, e.g. "2026-03-30T01:05:00.000Z"
+}
+
+function tzOffsetLabel(): string {
+  const off = -new Date().getTimezoneOffset();
+  const sign = off >= 0 ? "+" : "-";
+  const h = String(Math.floor(Math.abs(off) / 60)).padStart(2, "0");
+  const m = String(Math.abs(off) % 60).padStart(2, "0");
+  return `(UTC${sign}${h}:${m})`;
+}
+
+function validateAbsoluteRange(startLocal: string, stopLocal: string): {
+  ok: boolean;
+  error: string;
+} {
+  if (!startLocal || !stopLocal) {
+    return {
+      ok: false,
+      error: `绝对时间模式下请同时选择开始时间和结束时间（当前 start='${startLocal}', stop='${stopLocal}'）`,
+    };
+  }
+  const startIso = localDatetimeToRFC3339(startLocal);
+  const stopIso = localDatetimeToRFC3339(stopLocal);
+  const sd = new Date(startIso);
+  const ed = new Date(stopIso);
+  if (isNaN(sd.getTime()) || isNaN(ed.getTime())) {
+    return {
+      ok: false,
+      error: `时间解析失败（start='${startLocal}', stop='${stopLocal}'）`,
+    };
+  }
+  if (sd.getTime() >= ed.getTime()) {
+    return { ok: false, error: "结束时间必须晚于开始时间" };
+  }
+  return { ok: true, error: "" };
+}
+
+function todayLocalDate(): string {
+  // YYYY-MM-DD in local time
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function splitLocalDateTime(s: string): { date: string; time: string } {
+  if (!s) return { date: "", time: "" };
+  const t = s.trim().replace(" ", "T");
+  const [date, timeRaw = ""] = t.split("T");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date || "")) return { date: "", time: "" };
+  // Accept HH:mm or HH:mm:ss; keep at most HH:mm:ss for <input type="time">
+  const time = (timeRaw || "").slice(0, 8);
+  return { date, time };
+}
+
+function combineLocalDateTime(date: string, time: string): string {
+  const d = (date || "").trim();
+  let t = (time || "").trim();
+  if (!d) return "";
+  if (!t) t = "00:00:00";
+  if (/^\d{2}:\d{2}$/.test(t)) t = `${t}:00`;
+  if (/^\d{2}:\d{2}:\d{2}$/.test(t)) return `${d}T${t}`;
+  return `${d}T00:00:00`;
 }
