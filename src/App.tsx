@@ -1,5 +1,4 @@
 import { useState, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { DatabaseIcon, SettingsIcon } from "lucide-react";
 import Dashboard from "./pages/Dashboard";
 import Settings from "./pages/Settings";
@@ -12,13 +11,17 @@ export default function App() {
   const [config, setConfig] = useState<InfluxConfig>(DEFAULT_CONFIG);
 
   useEffect(() => {
-    invoke<InfluxConfig | null>("load_settings").then((saved) => {
-      if (saved) setConfig(saved);
-    });
+    const raw = localStorage.getItem("influx_config");
+    if (!raw) return;
+    try {
+      setConfig(JSON.parse(raw) as InfluxConfig);
+    } catch {
+      localStorage.removeItem("influx_config");
+    }
   }, []);
 
   const handleSaveConfig = async (newConfig: InfluxConfig) => {
-    await invoke("save_settings", { config: newConfig });
+    localStorage.setItem("influx_config", JSON.stringify(newConfig));
     setConfig(newConfig);
   };
 

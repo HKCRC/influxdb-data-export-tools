@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { InfluxConfig } from "../types";
 import { CheckCircleIcon, XCircleIcon, WifiIcon, SaveIcon } from "lucide-react";
+import { testConnection } from "../api";
 
 interface Props {
   config: InfluxConfig;
@@ -23,7 +23,7 @@ export default function Settings({ config, onSave }: Props) {
     setTestStatus("testing");
     setTestMessage("");
     try {
-      const msg = await invoke<string>("test_connection", { config: form });
+      const msg = await testConnection(form);
       setTestStatus("ok");
       setTestMessage(msg);
     } catch (e) {

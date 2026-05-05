@@ -19,7 +19,7 @@ export interface QueryParams {
 }
 
 export interface DownloadConfig {
-  format: "csv" | "xlsx_by_day";
+  format: "csv" | "csv_by_day" | "xlsx_by_day";
   records_per_sec: number;
 }
 
@@ -31,6 +31,8 @@ export interface ProgressPayload {
   eta_seconds: number | null;
   status: "running" | "completed" | "cancelled" | "error";
   message: string;
+  downloadUrl?: string;
+  fileName?: string;
 }
 
 export interface PreviewResult {
@@ -71,6 +73,6 @@ export const DEFAULT_CONFIG: InfluxConfig = {
 };
 
 export const DEFAULT_DOWNLOAD_CONFIG: DownloadConfig = {
-  format: "csv",
+  format: "csv_by_day",
   records_per_sec: 3000,
 };

@@ -1,8 +1,4 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen, UnlistenFn } from "@tauri-apps/api/event";
-import { save } from "@tauri-apps/plugin-dialog";
-import { message } from "@tauri-apps/plugin-dialog";
 import {
   PlusIcon,
   XIcon,
@@ -25,6 +21,17 @@ import {
   RELATIVE_OPTIONS,
   DEFAULT_DOWNLOAD_CONFIG,
 } from "../types";
+import {
+  cancelExport,
+  exportDownloadUrl,
+  exportEventsUrl,
+  getBuckets,
+  getMeasurements,
+  getTagKeys,
+  getTagValues,
+  previewQuery,
+  startExport,
+} from "../api";
 
 interface Props {
   config: InfluxConfig;
@@ -61,7 +68,8 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
   const [isDownloading, setIsDownloading] = useState(false);
   const [loading, setLoading] = useState<Record<string, boolean>>({});
   const [error, setError] = useState("");
-  const unlistenRef = useRef<UnlistenFn | null>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
+  const currentJobIdRef = useRef<string | null>(null);
 
   const configValid = config.url && config.token && config.org;
 
@@ -73,7 +81,7 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
     if (!configValid) return;
     setLoadingKey("buckets", true);
     setError("");
-    invoke<string[]>("get_buckets", { config })
+    getBuckets(config)
       .then((b) => {
         setBuckets(b);
         setSelectedBucket("");
@@ -91,7 +99,7 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
     setSelectedMeasurement("");
     setFilters([]);
     setTagKeys([]);
-    invoke<string[]>("get_measurements", { config, bucket: selectedBucket })
+    getMeasurements(config, selectedBucket)
       .then(setMeasurements)
       .catch((e) => setError(String(e)))
       .finally(() => setLoadingKey("measurements", false));
@@ -103,11 +111,7 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
     setLoadingKey("tagkeys", true);
     setFilters([]);
     setTagValuesCache({});
-    invoke<string[]>("get_tag_keys", {
-      config,
-      bucket: selectedBucket,
-      measurement: selectedMeasurement,
-    })
+    getTagKeys(config, selectedBucket, selectedMeasurement)
       .then(setTagKeys)
       .catch((e) => setError(String(e)))
       .finally(() => setLoadingKey("tagkeys", false));
@@ -121,15 +125,15 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
     ) => {
       if (tagValuesCache[cacheKey]) return;
       try {
-        const vals = await invoke<string[]>("get_tag_values", {
+        const vals = await getTagValues(
           config,
-          bucket: selectedBucket,
-          measurement: selectedMeasurement,
-          tag: tagKey,
-          filters: existingFilters
+          selectedBucket,
+          selectedMeasurement,
+          tagKey,
+          existingFilters
             .filter((f) => f.key && f.value)
             .map((f) => ({ key: f.key, value: f.value })),
-        });
+        );
         setTagValuesCache((prev) => ({ ...prev, [cacheKey]: vals }));
       } catch (e) {
         setError(String(e));
@@ -197,10 +201,7 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
     setShowPreview(true);
     setPreviewDebug(null);
     try {
-      const result = await invoke<PreviewResult>("preview_query", {
-        config,
-        params: buildQueryParams(),
-      });
+      const result = await previewQuery(config, buildQueryParams());
       setPreviewData(result);
     } catch (e) {
       setError(String(e));
@@ -236,60 +237,52 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
         return;
       }
     }
-    const ext = downloadConfig.format === "xlsx_by_day" ? "xlsx" : "csv";
-    const filePath = await save({
-      defaultPath: `data_${Date.now()}.${ext}`,
-      filters:
-        downloadConfig.format === "xlsx_by_day"
-          ? [{ name: "Excel 文件", extensions: ["xlsx"] }]
-          : [{ name: "CSV 文件", extensions: ["csv"] }],
-    });
-    if (!filePath) return;
 
     setIsDownloading(true);
     setProgress(null);
     setError("");
-
-    // Set up progress listener
-    unlistenRef.current = await listen<ProgressPayload>(
-      "download-progress",
-      (event) => {
-        setProgress(event.payload);
-        if (
-          event.payload.status === "completed" ||
-          event.payload.status === "cancelled" ||
-          event.payload.status === "error"
-        ) {
-          setIsDownloading(false);
-          const title =
-            event.payload.status === "completed"
-              ? "下载完成"
-              : event.payload.status === "cancelled"
-                ? "已终止"
-                : "下载失败";
-          void message(event.payload.message, { title, kind: "info" });
-        }
-      },
-    );
+    eventSourceRef.current?.close();
 
     try {
-      await invoke("start_download", {
+      const { jobId } = await startExport(
         config,
-        params: buildQueryParams(),
-        filePath,
+        buildQueryParams(),
         downloadConfig,
-      });
+      );
+      currentJobIdRef.current = jobId;
+
+      const events = new EventSource(exportEventsUrl(jobId));
+      eventSourceRef.current = events;
+      events.onmessage = (event) => {
+        const payload = JSON.parse(event.data) as ProgressPayload;
+        setProgress(payload);
+        if (
+          payload.status === "completed" ||
+          payload.status === "cancelled" ||
+          payload.status === "error"
+        ) {
+          setIsDownloading(false);
+          currentJobIdRef.current = null;
+          events.close();
+          eventSourceRef.current = null;
+        }
+      };
+      events.onerror = () => {
+        setError("进度连接已断开，请检查后端服务状态");
+        setIsDownloading(false);
+        events.close();
+        eventSourceRef.current = null;
+      };
     } catch (e) {
       setError(String(e));
       setIsDownloading(false);
-    } finally {
-      unlistenRef.current?.();
-      unlistenRef.current = null;
     }
   };
 
   const handleCancel = async () => {
-    await invoke("cancel_download");
+    const jobId = currentJobIdRef.current;
+    if (!jobId) return;
+    await cancelExport(jobId);
   };
 
   const canQuery = configValid && selectedBucket && selectedMeasurement;
@@ -338,7 +331,7 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
                 <button
                   onClick={() => {
                     setLoadingKey("buckets", true);
-                    invoke<string[]>("get_buckets", { config })
+                    getBuckets(config)
                       .then(setBuckets)
                       .catch((e) => setError(String(e)))
                       .finally(() => setLoadingKey("buckets", false));
@@ -544,7 +537,10 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
                         className="bg-[#0f1117] border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-blue-500"
                       />
                     </div>
-                    <span className="text-xs text-slate-600" title="时间按本地时区输入，查询时自动转为 UTC">
+                    <span
+                      className="text-xs text-slate-600"
+                      title="时间按本地时区输入，查询时自动转为 UTC"
+                    >
                       本地时区 {tzOffsetLabel()}
                     </span>
                   </div>
@@ -624,6 +620,7 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
                   disabled={isDownloading}
                   className="bg-[#0f1117] border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-blue-500 disabled:opacity-40 disabled:cursor-not-allowed"
                 >
+                  <option value="csv_by_day">CSV（按天打包）</option>
                   <option value="csv">CSV（单表）</option>
                   <option value="xlsx_by_day">XLSX（按天分 Sheet）</option>
                 </select>
@@ -648,7 +645,8 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
                 <span className="text-slate-500">条/秒</span>
               </label>
               <p className="text-xs text-slate-500">
-                建议：默认 3000；生产环境通常 2000~5000 更稳（我已限制最大 5000）
+                建议：默认 3000；生产环境通常 2000~5000 更稳（我已限制最大
+                5000）
               </p>
             </div>
 
@@ -663,8 +661,8 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
                     {progress.message}
                   </span>
                   <span className="font-mono">
-                    {progress.percent.toFixed(1)}% ·{" "}
-                    {progress.completed_chunks}/{progress.total_chunks} 块 ·{" "}
+                    {progress.percent.toFixed(1)}% · {progress.completed_chunks}
+                    /{progress.total_chunks} 块 ·{" "}
                     {progress.total_records.toLocaleString()} 条
                   </span>
                 </div>
@@ -693,6 +691,15 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
                     }}
                   />
                 </div>
+                {progress.status === "completed" && progress.downloadUrl && (
+                  <a
+                    href={exportDownloadUrl(progress.downloadUrl)}
+                    download={progress.fileName}
+                    className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium transition-colors"
+                  >
+                    下载文件{progress.fileName ? `：${progress.fileName}` : ""}
+                  </a>
+                )}
               </div>
             )}
           </div>
@@ -833,7 +840,8 @@ function formatDuration(totalSeconds: number) {
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
   const sec = s % 60;
-  if (h > 0) return `${h}h ${String(m).padStart(2, "0")}m ${String(sec).padStart(2, "0")}s`;
+  if (h > 0)
+    return `${h}h ${String(m).padStart(2, "0")}m ${String(sec).padStart(2, "0")}s`;
   return `${m}m ${String(sec).padStart(2, "0")}s`;
 }
 
@@ -863,7 +871,10 @@ function tzOffsetLabel(): string {
   return `(UTC${sign}${h}:${m})`;
 }
 
-function validateAbsoluteRange(startLocal: string, stopLocal: string): {
+function validateAbsoluteRange(
+  startLocal: string,
+  stopLocal: string,
+): {
   ok: boolean;
   error: string;
 } {
