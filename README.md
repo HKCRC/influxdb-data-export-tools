@@ -32,6 +32,7 @@ The server also serves the built `dist/` frontend.
 - `SESSION_TTL_HOURS`: login session length, default `4`.
 - `USER_DB_PATH`: file-backed user database path, default `server/data/users.json`.
 - `INFLUX_URL` / `INFLUX_TOKEN` / `INFLUX_ORG`: optional server-side InfluxDB connection used by all logged-in users.
+- `EXPORT_CHUNK_MINUTES`: export query chunk size, default `10`; lower it to reduce peak memory for dense data.
 
 Copy `.env.example` to `.env` before Docker deployment and set the administrator password and InfluxDB values.
 

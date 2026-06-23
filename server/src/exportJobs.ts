@@ -10,7 +10,7 @@ import type { DownloadConfig, InfluxConfig, ProgressPayload, QueryParams } from 
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const EXPORT_ROOT = path.resolve(__dirname, "../tmp/exports");
-const CHUNK_MINUTES = 10;
+const CHUNK_MINUTES = Math.max(1, Number(process.env.EXPORT_CHUNK_MINUTES ?? 10));
 const MAX_SHEET_ROWS = 1_048_576;
 const EXPORT_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -221,7 +221,8 @@ function parseChunkRows(csvText: string): RowBatch {
   let timeIndex = outputHeader.findIndex((name) => name === "_time");
   const rows: string[][] = [];
 
-  for (const record of records.slice(1)) {
+  for (let i = 1; i < records.length; i += 1) {
+    const record = records[i]!;
     if (isRepeatedHeader(record, header)) {
       header = record;
       keep = buildKeepIndices(header);
@@ -260,11 +261,11 @@ class CsvAllWriter implements ExportWriter {
   async writeRows(batch: RowBatch): Promise<number> {
     if (batch.header.length === 0) return 0;
     if (!this.headerWritten) {
-      this.stream.write(`${toCsvLine(batch.header)}\n`);
+      await writeLine(this.stream, toCsvLine(batch.header));
       this.headerWritten = true;
     }
     for (const row of batch.rows) {
-      this.stream.write(`${toCsvLine(row)}\n`);
+      await writeLine(this.stream, toCsvLine(row));
     }
     return batch.rows.length;
   }
@@ -292,10 +293,10 @@ class CsvByDayWriter implements ExportWriter {
       const date = extractLocalDate(row[batch.timeIndex] ?? "");
       const target = this.ensureFile(date);
       if (!target.headerWritten) {
-        target.stream.write(`${toCsvLine(batch.header)}\n`);
+        await writeLine(target.stream, toCsvLine(batch.header));
         target.headerWritten = true;
       }
-      target.stream.write(`${toCsvLine(row)}\n`);
+      await writeLine(target.stream, toCsvLine(row));
     }
 
     return batch.rows.length;
@@ -506,6 +507,28 @@ function endStream(stream: fs.WriteStream): Promise<void> {
   return new Promise((resolve, reject) => {
     stream.once("error", reject);
     stream.end(resolve);
+  });
+}
+
+function writeLine(stream: fs.WriteStream, line: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onError = (error: Error) => {
+      stream.off("drain", onDrain);
+      reject(error);
+    };
+    const onDrain = () => {
+      stream.off("error", onError);
+      resolve();
+    };
+
+    stream.once("error", onError);
+    const ok = stream.write(`${line}\n`, () => {
+      if (ok) {
+        stream.off("error", onError);
+        resolve();
+      }
+    });
+    if (!ok) stream.once("drain", onDrain);
   });
 }
 
