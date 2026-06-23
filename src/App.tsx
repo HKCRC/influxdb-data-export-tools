@@ -1,14 +1,20 @@
 import { useState, useEffect } from "react";
-import { DatabaseIcon, SettingsIcon } from "lucide-react";
+import { DatabaseIcon, LogOutIcon, SettingsIcon, UsersIcon } from "lucide-react";
 import Dashboard from "./pages/Dashboard";
+import Login from "./pages/Login";
 import Settings from "./pages/Settings";
-import { InfluxConfig, DEFAULT_CONFIG } from "./types";
+import UserAdmin from "./pages/UserAdmin";
+import { AuthUser, InfluxConfig, DEFAULT_CONFIG } from "./types";
+import { getCurrentUser, getInfluxConfigStatus, logout } from "./api";
 
-type Page = "dashboard" | "settings";
+type Page = "dashboard" | "settings" | "users";
 
 export default function App() {
   const [page, setPage] = useState<Page>("dashboard");
   const [config, setConfig] = useState<InfluxConfig>(DEFAULT_CONFIG);
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [checkingSession, setCheckingSession] = useState(true);
+  const [serverConfigReady, setServerConfigReady] = useState(false);
 
   useEffect(() => {
     const raw = localStorage.getItem("influx_config");
@@ -20,10 +26,44 @@ export default function App() {
     }
   }, []);
 
+  useEffect(() => {
+    getCurrentUser()
+      .then(async (currentUser) => {
+        setUser(currentUser);
+        setServerConfigReady(await getInfluxConfigStatus().catch(() => false));
+      })
+      .catch(() => setUser(null))
+      .finally(() => setCheckingSession(false));
+  }, []);
+
   const handleSaveConfig = async (newConfig: InfluxConfig) => {
     localStorage.setItem("influx_config", JSON.stringify(newConfig));
     setConfig(newConfig);
   };
+
+  const handleLogin = async (nextUser: AuthUser) => {
+    setUser(nextUser);
+    setServerConfigReady(await getInfluxConfigStatus().catch(() => false));
+  };
+
+  const handleLogout = async () => {
+    await logout().catch(() => undefined);
+    setUser(null);
+    setServerConfigReady(false);
+    setPage("dashboard");
+  };
+
+  if (checkingSession) {
+    return (
+      <div className="h-screen bg-[#0f1117] text-slate-500 flex items-center justify-center text-sm">
+        加载中...
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <Login onLogin={(nextUser) => void handleLogin(nextUser)} />;
+  }
 
   return (
     <div className="flex h-screen bg-[#0f1117] text-slate-200 overflow-hidden">
@@ -51,23 +91,51 @@ export default function App() {
           active={page === "dashboard"}
           onClick={() => setPage("dashboard")}
         />
+        {user.role === "admin" && (
+          <>
+            <NavButton
+              icon={<UsersIcon size={18} />}
+              label="用户"
+              active={page === "users"}
+              onClick={() => setPage("users")}
+            />
+            <NavButton
+              icon={<SettingsIcon size={18} />}
+              label="设置"
+              active={page === "settings"}
+              onClick={() => setPage("settings")}
+            />
+          </>
+        )}
+        <div className="flex-1" />
         <NavButton
-          icon={<SettingsIcon size={18} />}
-          label="设置"
-          active={page === "settings"}
-          onClick={() => setPage("settings")}
+          icon={<LogOutIcon size={18} />}
+          label={`退出 ${user.username}`}
+          active={false}
+          onClick={handleLogout}
         />
       </aside>
 
       {/* Main content */}
       <main className="flex-1 overflow-hidden">
-        {page === "dashboard" ? (
+        {page !== "settings" && page !== "users" ? (
           <Dashboard
             config={config}
+            user={user}
+            serverConfigReady={serverConfigReady}
             onNeedSettings={() => setPage("settings")}
           />
-        ) : (
+        ) : page === "users" && user.role === "admin" ? (
+          <UserAdmin />
+        ) : user.role === "admin" ? (
           <Settings config={config} onSave={handleSaveConfig} />
+        ) : (
+          <Dashboard
+            config={config}
+            user={user}
+            serverConfigReady={serverConfigReady}
+            onNeedSettings={() => undefined}
+          />
         )}
       </main>
     </div>

@@ -3,6 +3,7 @@ node_modules/
 dist/
 server/dist/
 server/tmp/
+.env
 
 # Rust / Tauri
 src-tauri/target/

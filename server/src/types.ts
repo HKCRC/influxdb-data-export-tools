@@ -24,10 +24,24 @@ export const downloadConfigSchema = z.object({
   records_per_sec: z.number().finite().min(1),
 });
 
+export const queryPermissionSchema = z.object({
+  bucket: z.string().min(1),
+  measurement: z.string().min(1),
+  topic: z.string().optional(),
+});
+
+export const childUserInputSchema = z.object({
+  username: z.string().min(1),
+  password: z.string().optional(),
+  maxRecordsPerSec: z.number().finite().min(1),
+  permissions: z.array(queryPermissionSchema),
+});
+
 export type InfluxConfig = z.infer<typeof influxConfigSchema>;
 export type FilterCondition = z.infer<typeof filterConditionSchema>;
 export type QueryParams = z.infer<typeof queryParamsSchema>;
 export type DownloadConfig = z.infer<typeof downloadConfigSchema>;
+export type QueryPermission = z.infer<typeof queryPermissionSchema>;
 
 export type ProgressStatus = "running" | "completed" | "cancelled" | "error";
 

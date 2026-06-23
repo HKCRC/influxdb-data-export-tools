@@ -28,6 +28,21 @@ The server also serves the built `dist/` frontend.
 - `PORT`: API server port, default `3001`.
 - `CLIENT_ORIGIN`: allowed CORS origin for development, default `http://localhost:1420`.
 - `VITE_API_BASE`: frontend API base URL, default `http://localhost:3001`.
+- `ADMIN_USERNAME` / `ADMIN_PASSWORD`: super administrator credentials created from environment.
+- `SESSION_TTL_HOURS`: login session length, default `4`.
+- `USER_DB_PATH`: file-backed user database path, default `server/data/users.json`.
+- `INFLUX_URL` / `INFLUX_TOKEN` / `INFLUX_ORG`: optional server-side InfluxDB connection used by all logged-in users.
+
+Copy `.env.example` to `.env` before Docker deployment and set the administrator password and InfluxDB values.
+
+## Docker
+
+```bash
+cp .env.example .env
+docker compose up -d --build
+```
+
+Open `http://localhost:3001`, log in with `ADMIN_USERNAME` / `ADMIN_PASSWORD`, then create child users from the user management page. Child users can only query their assigned `bucket + measurement + topic` permissions. Leaving `topic` blank grants all topics for that `bucket + measurement`.
 
 ## Export Behavior
 

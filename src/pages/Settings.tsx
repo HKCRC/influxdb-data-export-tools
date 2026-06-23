@@ -117,9 +117,9 @@ export default function Settings({ config, onSave }: Props) {
           <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">
             关于
           </h2>
-          <p className="text-sm text-slate-400">InfluxDB 数据查询工具 v0.1.0</p>
+          <p className="text-sm text-slate-400">基于InfluxDB 数据查询工具 v0.1.0</p>
           <p className="text-xs text-slate-500">
-            支持 InfluxDB v2.x / Flux 查询语言
+           技术支持 dubinbin@hkcrc.hk
           </p>
         </div>
       </div>

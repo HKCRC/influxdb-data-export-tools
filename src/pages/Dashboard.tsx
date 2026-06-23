@@ -17,6 +17,7 @@ import {
   ProgressPayload,
   PreviewResult,
   PreviewDebugResult,
+  AuthUser,
   TimeRange,
   RELATIVE_OPTIONS,
   DEFAULT_DOWNLOAD_CONFIG,
@@ -35,12 +36,19 @@ import {
 
 interface Props {
   config: InfluxConfig;
+  user: AuthUser;
+  serverConfigReady: boolean;
   onNeedSettings: () => void;
 }
 
 let filterIdCounter = 0;
 
-export default function Dashboard({ config, onNeedSettings }: Props) {
+export default function Dashboard({
+  config,
+  user,
+  serverConfigReady,
+  onNeedSettings,
+}: Props) {
   const [buckets, setBuckets] = useState<string[]>([]);
   const [selectedBucket, setSelectedBucket] = useState("");
   const [measurements, setMeasurements] = useState<string[]>([]);
@@ -71,7 +79,9 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
   const eventSourceRef = useRef<EventSource | null>(null);
   const currentJobIdRef = useRef<string | null>(null);
 
-  const configValid = config.url && config.token && config.org;
+  const isAdmin = user.role === "admin";
+  const configValid = serverConfigReady || Boolean(config.url && config.token && config.org);
+  const topicAccess = getTopicAccess(user, selectedBucket, selectedMeasurement);
 
   const setLoadingKey = (key: string, val: boolean) =>
     setLoading((prev) => ({ ...prev, [key]: val }));
@@ -90,7 +100,13 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
       })
       .catch((e) => setError(String(e)))
       .finally(() => setLoadingKey("buckets", false));
-  }, [config.url, config.token, config.org]);
+  }, [config.url, config.token, config.org, configValid]);
+
+  useEffect(() => {
+    if (!isAdmin && buckets.length === 1 && !selectedBucket) {
+      setSelectedBucket(buckets[0] ?? "");
+    }
+  }, [buckets, isAdmin, selectedBucket]);
 
   // Load measurements when bucket changes
   useEffect(() => {
@@ -105,6 +121,12 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
       .finally(() => setLoadingKey("measurements", false));
   }, [selectedBucket]);
 
+  useEffect(() => {
+    if (!isAdmin && measurements.length === 1 && !selectedMeasurement) {
+      setSelectedMeasurement(measurements[0] ?? "");
+    }
+  }, [measurements, isAdmin, selectedMeasurement]);
+
   // Load tag keys when measurement changes
   useEffect(() => {
     if (!selectedBucket || !selectedMeasurement) return;
@@ -116,6 +138,37 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
       .catch((e) => setError(String(e)))
       .finally(() => setLoadingKey("tagkeys", false));
   }, [selectedMeasurement]);
+
+  useEffect(() => {
+    setDownloadConfig((prev) => ({
+      ...prev,
+      records_per_sec: isAdmin ? prev.records_per_sec : user.maxRecordsPerSec,
+    }));
+  }, [isAdmin, user.maxRecordsPerSec]);
+
+  useEffect(() => {
+    if (!selectedBucket || !selectedMeasurement || isAdmin) return;
+    const access = getTopicAccess(user, selectedBucket, selectedMeasurement);
+    setFilters((prev) => {
+      if (access.mode !== "restricted") return prev.filter((filter) => !filter.locked);
+      if (access.topics.length === 0) return prev.filter((filter) => !filter.locked);
+
+      const existing = prev.find((filter) => filter.key === "topic");
+      const value = existing?.value && access.topics.includes(existing.value)
+        ? existing.value
+        : access.topics[0]!;
+      const lockedTopic: FilterCondition = {
+        id: existing?.id ?? String(++filterIdCounter),
+        key: "topic",
+        value,
+        locked: true,
+      };
+      return [
+        lockedTopic,
+        ...prev.filter((filter) => filter.id !== existing?.id && filter.key !== "topic"),
+      ];
+    });
+  }, [isAdmin, selectedBucket, selectedMeasurement, user]);
 
   const loadTagValues = useCallback(
     async (
@@ -148,13 +201,14 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
   };
 
   const removeFilter = (id: string) => {
-    setFilters((prev) => prev.filter((f) => f.id !== id));
+    setFilters((prev) => prev.filter((f) => f.id !== id || f.locked));
   };
 
   const updateFilter = (id: string, field: "key" | "value", val: string) => {
     setFilters((prev) =>
       prev.map((f) => {
         if (f.id !== id) return f;
+        if (f.locked && field === "key") return f;
         if (field === "key") return { ...f, key: val, value: "" };
         return { ...f, [field]: val };
       }),
@@ -251,7 +305,9 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
       );
       currentJobIdRef.current = jobId;
 
-      const events = new EventSource(exportEventsUrl(jobId));
+      const events = new EventSource(exportEventsUrl(jobId), {
+        withCredentials: true,
+      });
       eventSourceRef.current = events;
       events.onmessage = (event) => {
         const payload = JSON.parse(event.data) as ProgressPayload;
@@ -292,7 +348,7 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
       {/* Header */}
       <div className="flex items-center gap-3 px-6 py-3 border-b border-slate-700/50 shrink-0">
         <h1 className="text-base font-semibold text-slate-100">数据查询</h1>
-        {!configValid && (
+        {!configValid && isAdmin && (
           <button
             onClick={onNeedSettings}
             className="flex items-center gap-1.5 text-xs text-amber-400 hover:text-amber-300 bg-amber-400/10 border border-amber-400/20 px-2.5 py-1 rounded-lg"
@@ -300,6 +356,12 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
             <AlertCircleIcon size={12} />
             请先配置 InfluxDB 连接
           </button>
+        )}
+        {!configValid && !isAdmin && (
+          <span className="flex items-center gap-1.5 text-xs text-amber-400 bg-amber-400/10 border border-amber-400/20 px-2.5 py-1 rounded-lg">
+            <AlertCircleIcon size={12} />
+            服务端尚未配置 InfluxDB 连接
+          </span>
         )}
       </div>
 
@@ -327,7 +389,7 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
                   onChange={setSelectedBucket}
                 />
               </div>
-              {selectedBucket && (
+              {isAdmin && selectedBucket && (
                 <button
                   onClick={() => {
                     setLoadingKey("buckets", true);
@@ -386,23 +448,31 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
                     placeholder="选择 tag..."
                     loading={loading["tagkeys"]}
                     onChange={(v) => updateFilter(filter.id, "key", v)}
-                    disabled={!selectedMeasurement}
+                    disabled={!selectedMeasurement || filter.locked}
                   />
                   <span className="text-xs text-slate-500">==</span>
                   <SelectBox
                     value={filter.value}
-                    options={tagValues}
+                    options={
+                      filter.key === "topic" && topicAccess.mode === "restricted"
+                        ? topicAccess.topics
+                        : tagValues
+                    }
                     placeholder="选择值..."
                     loading={false}
                     onChange={(v) => updateFilter(filter.id, "value", v)}
-                    disabled={!filter.key}
+                    disabled={!filter.key || (filter.locked && topicAccess.topics.length <= 1)}
                   />
-                  <button
-                    onClick={() => removeFilter(filter.id)}
-                    className="text-slate-600 hover:text-red-400 transition-colors shrink-0"
-                  >
-                    <XIcon size={14} />
-                  </button>
+                  {filter.locked ? (
+                    <span className="text-[11px] text-slate-500">已授权</span>
+                  ) : (
+                    <button
+                      onClick={() => removeFilter(filter.id)}
+                      className="text-slate-600 hover:text-red-400 transition-colors shrink-0"
+                    >
+                      <XIcon size={14} />
+                    </button>
+                  )}
                 </div>
               );
             })}
@@ -639,14 +709,15 @@ export default function Dashboard({ config, onNeedSettings }: Props) {
                       records_per_sec: Number(e.target.value),
                     }))
                   }
-                  disabled={isDownloading}
+                  disabled={isDownloading || !isAdmin}
                   className="w-24 bg-[#0f1117] border border-slate-600 rounded-lg px-2 py-1 text-sm text-slate-200 text-right focus:outline-none focus:border-blue-500 disabled:opacity-40 disabled:cursor-not-allowed"
                 />
                 <span className="text-slate-500">条/秒</span>
               </label>
               <p className="text-xs text-slate-500">
-                建议：默认 3000；生产环境通常 2000~5000 更稳（我已限制最大
-                5000）
+                {isAdmin
+                  ? "建议：默认 3000；生产环境通常 2000~5000 更稳（我已限制最大 5000）"
+                  : "该上限由管理员分配，导出时后端会强制按此值执行"}
               </p>
             </div>
 
@@ -927,4 +998,27 @@ function combineLocalDateTime(date: string, time: string): string {
   if (/^\d{2}:\d{2}$/.test(t)) t = `${t}:00`;
   if (/^\d{2}:\d{2}:\d{2}$/.test(t)) return `${d}T${t}`;
   return `${d}T00:00:00`;
+}
+
+function getTopicAccess(
+  user: AuthUser,
+  bucket: string,
+  measurement: string,
+): { mode: "admin" | "all" | "restricted"; topics: string[] } {
+  if (user.role === "admin" || !bucket || !measurement) {
+    return { mode: "admin", topics: [] };
+  }
+
+  const matched = user.permissions.filter(
+    (permission) =>
+      permission.bucket === bucket && permission.measurement === measurement,
+  );
+  if (matched.some((permission) => !permission.topic)) {
+    return { mode: "all", topics: [] };
+  }
+
+  return {
+    mode: "restricted",
+    topics: [...new Set(matched.map((permission) => permission.topic).filter(Boolean) as string[])].sort(),
+  };
 }

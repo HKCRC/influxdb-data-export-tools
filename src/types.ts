@@ -8,6 +8,7 @@ export interface FilterCondition {
   id: string;
   key: string;
   value: string;
+  locked?: boolean;
 }
 
 export interface QueryParams {
@@ -43,6 +44,20 @@ export interface PreviewResult {
 export interface PreviewDebugResult {
   query: string;
   csv_head: string;
+}
+
+export interface QueryPermission {
+  bucket: string;
+  measurement: string;
+  topic?: string;
+}
+
+export interface AuthUser {
+  id: string;
+  username: string;
+  role: "admin" | "user";
+  maxRecordsPerSec: number;
+  permissions: QueryPermission[];
 }
 
 export type TimeRangeMode = "relative" | "absolute";
